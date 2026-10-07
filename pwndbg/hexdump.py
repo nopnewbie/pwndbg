@@ -1,105 +1,144 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
 """
 Hexdump implementation, ~= stolen from pwntools.
 """
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
 
-import copy
+from __future__ import annotations
+
 import string
 
+import pwnlib.util.lists
+
+import pwndbg
 import pwndbg.color.hexdump as H
-import pwndbg.color.theme as theme
-import pwndbg.config
+from pwndbg.color import theme
 
 color_scheme = None
 printable = None
 
-def groupby(array, count, fill=None):
-    array = copy.copy(array)
-    while fill and len(array) % count:
-        array.append(fill)
-    for i in range(0, len(array), count):
-        yield array[i:i+count]
 
-config_colorize_ascii = theme.Parameter('hexdump-colorize-ascii', True, 'whether to colorize the hexdump command ascii section')
-config_separator      = theme.Parameter('hexdump-ascii-block-separator', '│', 'block separator char of the hexdump command')
+def groupby(width: int, array, fill=None):
+    return pwnlib.util.lists.group(width, array, underfull_action="fill", fill_value=fill)
 
-@pwndbg.config.Trigger([H.config_normal, H.config_zero, H.config_special, H.config_printable, config_colorize_ascii])
-def load_color_scheme():
+
+config_colorize_ascii = theme.add_param(
+    "hexdump-colorize-ascii", True, "whether to colorize the hexdump command ascii section"
+)
+config_separator = theme.add_param(
+    "hexdump-ascii-block-separator", "│", "block separator char of the hexdump command"
+)
+config_byte_separator = theme.add_param(
+    "hexdump-byte-separator",
+    " ",
+    "separator of single bytes in hexdump (does NOT affect group separator)",
+)
+
+
+@pwndbg.config.trigger(
+    H.config_normal, H.config_zero, H.config_special, H.config_printable, config_colorize_ascii
+)
+def load_color_scheme() -> None:
     global color_scheme, printable
     #
     # We want to colorize the hex characters and only print out
-    # printable values on the righ hand side.
+    # printable values on the right hand side.
     #
-    color_scheme = {i:H.normal("%02x" % i) for i in range(256)}
-    printable = {i:H.normal('.') for i in range(256)}
+    color_scheme = {i: H.normal(f"{i:02x}") for i in range(256)}
+    printable = {i: H.normal(".") for i in range(256)}
 
-    for c in bytearray((string.ascii_letters + string.digits + string.punctuation).encode('utf-8', 'ignore')):
-        color_scheme[c] = H.printable("%02x" % c)
-        printable[c] = H.printable("%s" % chr(c)) if pwndbg.config.hexdump_colorize_ascii else "%s" % chr(c)
+    for c in bytearray(
+        (string.ascii_letters + string.digits + string.punctuation).encode("utf-8", "ignore")
+    ):
+        color_scheme[c] = H.printable(f"{c:02x}")
+        printable[c] = (
+            H.printable(f"{chr(c)}") if pwndbg.config.hexdump_colorize_ascii else f"{chr(c)}"
+        )
 
-    for c in bytearray(b'\x00'):
-        color_scheme[c] = H.zero("%02x" % c)
-        printable[c] = H.zero('.') if pwndbg.config.hexdump_colorize_ascii else '.'
+    for c in bytearray(b"\x00"):
+        color_scheme[c] = H.zero(f"{c:02x}")
+        printable[c] = H.zero(".") if pwndbg.config.hexdump_colorize_ascii else "."
 
-    for c in bytearray(b'\xff\x7f\x80'):
-        color_scheme[c] = H.special("%02x" % c)
-        printable[c] = H.special('.') if pwndbg.config.hexdump_colorize_ascii else '.'
+    for c in bytearray(b"\xff\x7f\x80"):
+        color_scheme[c] = H.special(f"{c:02x}")
+        printable[c] = H.special(".") if pwndbg.config.hexdump_colorize_ascii else "."
 
-    color_scheme[-1] = '  '
-    printable[-1] = ' '
+    color_scheme[-1] = "  "
+    printable[-1] = " "
 
-def hexdump(data, address = 0, width = 16, skip = True, offset = 0):
+
+def hexdump(
+    data: bytes,
+    address: int = 0,
+    width: int = 16,
+    group_width: int = 4,
+    flip_group_endianness: bool = False,
+    skip: bool = True,
+    offset: int = 0,
+):
     if not color_scheme or not printable:
         load_color_scheme()
-    data = list(bytearray(data))
-    base = address
-    last_line = None
-    skipping  = False
-    for i, line in enumerate(groupby(data, width, -1)):
-        if skip and line == last_line:
-            if not skipping:
-                skipping = True
-                yield '...'
-            continue
-        else:
-            skipping  = False
-            last_line = line
 
-        hexline = []
+    # If there's nothing to print, just print the offset and address and return
+    if not data:
+        yield H.offset(f"+{offset:04x} ") + H.address(f"{address:#08x}  ")
 
-        if address:
-            hexline.append(H.offset("+%04x " % ((i + offset) * width)))
-
-        hexline.append(H.address("%#08x  " % (base + (i * width))))
-
-        for group in groupby(line, 4):
-            for char in group:
-                hexline.append(color_scheme[char])
-                hexline.append(' ')
-            hexline.append(' ')
-
-        hexline.append(H.separator('%s' % config_separator))
-        for group in groupby(line, 4):
-            for char in group:
-                hexline.append(printable[char])
-            hexline.append(H.separator('%s' % config_separator))
-
-        yield(''.join(hexline))
-
-    # skip empty footer if we printed something
-    if last_line:
+        # Don't allow iterating over this generator again
         return
 
-    hexline = []
+    data = list(bytearray(data))
 
-    if address:
-        hexline.append(H.offset("+%04x " % len(data)))
+    # Hexdump lines to skip_lines values and yields:
+    #
+    # <init: skip_lines = -1>
+    # line AAAA     => skip_lines =  0   => yield "AAAA"
+    # line AAAA     => skip_lines =  1   => <continue>
+    # line AAAA     => skip_lines = -1   => yield "skipped ..." + "AAAA"
+    # line BBBB     => skip_lines = -1   => yield "BBBB"
+    skip_lines = -1
 
-    hexline.append(H.address("%#08x  " % (base + len(data))))
+    config_separator_str = H.separator(str(config_separator))
+    config_byte_separator_str = str(config_byte_separator)
 
-    yield ''.join(hexline)
+    groupped = groupby(width, data, fill=-1)
+    before_last_idx = len(groupped) - 2
+
+    for i, line in enumerate(groupped):
+        # Handle skipping of identical lines (see skip_lines comment above)
+        if skip:
+            # Count lines to be skipped by checking next/future line
+            if i <= before_last_idx and line == groupped[i + 1]:
+                skip_lines += 1
+
+                # Since we count from -1 then 0 means we are on first line
+                # We want to yield that line, so we do not continue on that counter
+                if skip_lines != 0:
+                    continue
+
+            elif skip_lines > 0:
+                out = f"... ↓            skipped {skip_lines} identical lines ({skip_lines * width} bytes)"
+                skip_lines = -1
+                yield out
+                # Fallthrough (do not continue) so we yield the current line too
+
+        increment = i * width
+        hexline = [
+            H.offset(f"+{offset + increment:04x} "),
+            H.address(f"{address + increment:#08x}  "),
+        ]
+
+        for group in groupby(group_width, line):
+            group = reversed(group) if flip_group_endianness else group
+            for idx, char in enumerate(group):
+                if flip_group_endianness and idx == group_width - 1:
+                    hexline.append(H.highlight_group_lsb(color_scheme[char]))
+                else:
+                    hexline.append(color_scheme[char])
+                hexline.append(config_byte_separator_str)
+            hexline.append(" ")
+
+        hexline.append(config_separator_str)
+        for group in groupby(group_width, line):
+            for char in group:
+                hexline.append(printable[char])
+            hexline.append(config_separator_str)
+
+        yield "".join(hexline)

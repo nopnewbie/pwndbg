@@ -1,80 +1,153 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
+from __future__ import annotations
 
-import six
+from collections.abc import Callable
+from typing import Any
 
-import pwndbg.color.theme as theme
-import pwndbg.config as config
-import pwndbg.vmmap
-from pwndbg.color import generateColorFunction
+import pwndbg.aglib.qemu
+import pwndbg.aglib.stack
+import pwndbg.aglib.symbol
+import pwndbg.aglib.vmmap
+import pwndbg.dbg_mod
+import pwndbg.lib.memory
+import pwndbg.lib.pretty_print
+from pwndbg.color import ColorConfig
+from pwndbg.color import ColorParamSpec
 from pwndbg.color import normal
 
-config_stack  = theme.ColoredParameter('memory-stack-color', 'yellow', 'color for stack memory')
-config_heap   = theme.ColoredParameter('memory-heap-color', 'blue', 'color for heap memory')
-config_code   = theme.ColoredParameter('memory-code-color', 'red', 'color for executable memory')
-config_data   = theme.ColoredParameter('memory-data-color', 'purple', 'color for all other writable memory')
-config_rodata = theme.ColoredParameter('memory-rodata-color', 'normal', 'color for all read only memory')
-config_rwx    = theme.ColoredParameter('memory-rwx-color', 'underline', 'color added to all RWX memory')
+ColorFunction = Callable[[str], str]
 
-def stack(x):
-    return generateColorFunction(config.memory_stack_color)(x)
+c = ColorConfig(
+    "memory",
+    [
+        ColorParamSpec("stack", "yellow", "color for stack memory"),
+        ColorParamSpec("heap", "blue", "color for heap memory"),
+        ColorParamSpec("code", "red", "color for executable memory"),
+        ColorParamSpec("data", "purple", "color for all other writable memory"),
+        ColorParamSpec("rodata", "normal", "color for all read only memory"),
+        ColorParamSpec("wx", "underline", "color added to all WX memory"),
+        ColorParamSpec("guard", "cyan", "color added to all guard pages (no perms)"),
+    ],
+)
 
-def heap(x):
-    return generateColorFunction(config.memory_heap_color)(x)
 
-def code(x):
-    return generateColorFunction(config.memory_code_color)(x)
+def get_address_and_symbol(
+    address: int, decompiler_stack_variables: dict[int, str], respect_ptrwidth: bool = False
+) -> str:
+    """
+    Convert and colorize address 0x7ffff7fcecd0 to string `0x7ffff7fcecd0 (_dl_fini)`
+    If no symbol exists for the address, return colorized address.
 
-def data(x):
-    return generateColorFunction(config.memory_data_color)(x)
+    Args:
+        respect_ptrwidth: Align value to pointer width, i.e. would output
+            `0x00007ffff7fcecd0 (_dl_fini)`.
+    """
+    symbol = pwndbg.aglib.symbol.resolve_addr(address)
+    ptralignment: int = pwndbg.aglib.arch.ptrbits if respect_ptrwidth else -1
+    if symbol:
+        symbol = pwndbg.lib.pretty_print.int_to_string(address, ptralignment) + f" ({symbol})"
+    else:
+        var: str | None = pwndbg.aglib.stack.get_stack_var_name(address)
+        if var is None:
+            var = decompiler_stack_variables.get(address)
+        if var is not None:
+            symbol = pwndbg.lib.pretty_print.int_to_string(address, ptralignment) + f" {{{var}}}"
+    return get(address, symbol, respect_ptrwidth=respect_ptrwidth)
 
-def rodata(x):
-    return generateColorFunction(config.memory_rodata_color)(x)
 
-def rwx(x):
-    return generateColorFunction(config.memory_rwx_color)(x)
+def get_address_or_symbol(address: int, decompiler_stack_variables: dict[int, str]) -> str:
+    """
+    Convert and colorize address to symbol if it can be resolved, else return colorized address
+    """
+    return attempt_colorized_symbol(address, decompiler_stack_variables) or get(address)
 
-def get(address, text = None):
+
+def attempt_colorized_symbol(
+    address: int, decompiler_stack_variables: dict[int, str]
+) -> str | None:
+    """
+    Convert address to colorized symbol (if symbol is there), else None
+    """
+    symbol = pwndbg.aglib.symbol.resolve_addr(address)
+    if symbol:
+        return get(address, symbol)
+    var: str | None = pwndbg.aglib.stack.get_stack_var_name(address)
+    if var is None:
+        var = decompiler_stack_variables.get(address)
+    if var is not None:
+        return get(address, f"{{{var}}}")
+    return None
+
+
+# We have to accept `Any` here, as users may pass gdb.Value objects to this
+# function. This is probably more lenient than we'd really like.
+#
+# TODO: Remove the exception for gdb.Value case from `pwndbg.color.memory.get`.
+def get(
+    address: int | pwndbg.dbg_mod.Value | Any,
+    text: str | None = None,
+    prefix: str | None = None,
+    page: pwndbg.lib.memory.Page | None = None,
+    respect_ptrwidth: bool = False,
+) -> str:
     """
     Returns a colorized string representing the provided address.
 
     Arguments:
-        address(int): Address to look up
-        text(str): Optional text to use in place of the address
-              in the return value string.
+        address: Address to look up
+        text: Optional text to use in place of the address in the return value string.
+        prefix: Optional text to set at beginning in the return value string, followed by a space, without modifiying the original text.
+        respect_ptrwidth: Pad value with leading zeroes so that it is pointer-sized.
     """
     address = int(address)
+    if page is None:  # if we know the containing page, don't bother to find it as an optimization
+        page = pwndbg.aglib.vmmap.find(address)
 
-    page = pwndbg.vmmap.find(int(address))
+    color: Callable[[str], str]
 
-    if page is None:                 color = normal
-    elif '[stack' in page.objfile:   color = stack
-    elif '[heap'  in page.objfile:   color = heap
-    elif page.execute:               color = code
-    elif page.rw:                    color = data
-    else:                            color = rodata
+    if page is None:
+        color = normal
+    elif "[stack" in page.objfile:
+        color = c.stack
+    elif page.execute:
+        color = c.code
+    elif not page.write:
+        color = c.rodata
+    elif "[heap" in page.objfile or (
+        pwndbg.aglib.qemu.is_qemu_kernel()
+        and any(keyword in page.objfile for keyword in ("physmap", "vmalloc", "slab virtual"))
+    ):
+        color = c.heap
+    elif page.rw:
+        color = c.data
+    elif page.is_guard:
+        color = c.guard
+    else:
+        color = c.rodata
 
-    if page and page.rwx:
+    if page and page.wx:
         old_color = color
-        color = lambda x: rwx(old_color(x))
+        color = lambda x: c.wx(old_color(x))
 
-    if text is None and isinstance(address, six.integer_types) and address > 255:
-        text = hex(int(address))
     if text is None:
-        text = str(int(address))
+        ptralignment: int = pwndbg.aglib.arch.ptrbits if respect_ptrwidth else -1
+        text = pwndbg.lib.pretty_print.int_to_string(address, adhere_to_ptrwidth=ptralignment)
+
+    if prefix is not None:
+        # Prepend the prefix and a space before the existing text
+        text = f"{prefix} {text}"
 
     return color(text)
 
-def legend():
-    return 'LEGEND: ' + ' | '.join((
-        stack('STACK'),
-        heap('HEAP'),
-        code('CODE'),
-        data('DATA'),
-        rwx('RWX'),
-        rodata('RODATA')
-    ))
+
+def legend() -> str:
+    return "LEGEND: " + " | ".join(
+        (
+            c.stack("STACK"),
+            c.heap("HEAP"),
+            c.code("CODE"),
+            c.data("DATA"),
+            # WX segments will also be marked as code, so do 2 formatters here
+            c.wx(c.code("WX")),
+            c.rodata("RODATA"),
+        )
+    )

@@ -1,53 +1,49 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
+from __future__ import annotations
 
-import subprocess
-from re import search
-from subprocess import STDOUT
+import contextlib
+from collections.abc import Iterator
 
-import pwndbg.commands
-import pwndbg.memoize
-import pwndbg.wrappers
+import pwnlib.elf.elf
+import pwnlib.term.text
+from pwnlib.elf import ELF
 
-cmd_name = "checksec"
+pwnlib.elf.elf.log._logger.disabled = True
 
-@pwndbg.wrappers.OnlyWithCommand(cmd_name)
-@pwndbg.memoize.reset_on_objfile
-def get_raw_out():
-    local_path = pwndbg.file.get_file(pwndbg.proc.exe)
-    try:
-        version_output = subprocess.check_output([get_raw_out.cmd_path, "--version"], stderr=STDOUT).decode('utf-8')
-        match = search('checksec v([\\w.]+),', version_output)
-        if match:
-            version = tuple(map(int, (match.group(1).split("."))))
-            if version >= (2, 0):
-                return pwndbg.wrappers.call_cmd([get_raw_out.cmd_path, "--file=" + local_path])
-    except Exception:
-        pass
-    return pwndbg.wrappers.call_cmd([get_raw_out.cmd_path, "--file", local_path])
+from pwndbg.color import message
 
-@pwndbg.wrappers.OnlyWithCommand(cmd_name)
-def relro_status():
-    relro = "No RELRO"
-    out = get_raw_out()
 
-    if "Full RELRO" in out:
-        relro = "Full RELRO"
-    elif "Partial RELRO" in out:
-        relro = "Partial RELRO"
+@contextlib.contextmanager
+def monkeypatch_pwnlib_term_text() -> Iterator[None]:
+    # Note: It's kinda hacky to monkeypatch pwnlib.term.text like this, but I didn't find a better way to do it.
+    # The patch is for here:
+    # https://github.com/Gallopsled/pwntools/blob/f046fdd93e154bd892332f38cfbb518de130f1f2/pwnlib/elf/elf.py#L1999-L2001
+    # This might break in the future, so need to update this patch when the implementation of pwnlib changes.
+    pwnlib.term.text.red = message.error
+    pwnlib.term.text.green = message.success
+    pwnlib.term.text.yellow = message.warn
+    yield
+    del pwnlib.term.text.red
+    del pwnlib.term.text.green
+    del pwnlib.term.text.yellow
 
-    return relro
 
-@pwndbg.wrappers.OnlyWithCommand(cmd_name)
-def pie_status():
-    pie = "No PIE"
-    out = get_raw_out()
+def get_raw_out(local_path: str) -> str:
+    elf = ELF(local_path)
+    # 10 is the magic number used in elf.checksec() to align the output.
+    # https://github.com/Gallopsled/pwntools/blob/f046fdd93e154bd892332f38cfbb518de130f1f2/pwnlib/elf/elf.py#L2012
+    # We might need to update this number if the implementation of elf.checksec() changes in the future.
+    output = "File:".ljust(10) + elf.path + "\n"
+    output += "Arch:".ljust(10) + elf.arch + "\n"
+    with monkeypatch_pwnlib_term_text():
+        output += elf.checksec()
+    return output
 
-    if "PIE enabled" in out:
-        pie = "PIE enabled"
 
-    return pie
+def relro_status(local_path: str) -> str:
+    return {"Full": "Full RELRO", "Partial": "Partial RELRO", None: "No RELRO"}[
+        ELF(local_path).relro
+    ]
+
+
+def pie_status(local_path: str) -> str:
+    return "PIE enabled" if ELF(local_path).pie else "No PIE"

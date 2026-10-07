@@ -1,9 +1,4 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
+from __future__ import annotations
 
 import argparse
 import subprocess
@@ -11,34 +6,51 @@ import tempfile
 
 import gdb
 
+import pwndbg.aglib.proc
 import pwndbg.commands
-import pwndbg.vmmap
+from pwndbg.commands import CommandCategory
 
-parser = argparse.ArgumentParser(description="ROP gadget search with ropper.",
-                                epilog="Example: ropper -- --console; ropper -- --search 'mov e?x'")
-parser.add_argument('argument', nargs='*', type=str,
-                    help='Arguments to pass to ropper')
+parser = argparse.ArgumentParser(
+    description="ROP gadget search with ropper.",
+)
+parser.add_argument("argument", nargs="*", type=str, help="Arguments to pass to ropper")
 
 
-@pwndbg.commands.ArgparsedCommand(parser)
+@pwndbg.commands.Command(
+    parser,
+    category=CommandCategory.INTEGRATIONS,
+    examples="""
+pwndbg> ropper -- --console
+[INFO] Load gadgets from cache
+[LOAD] loading... 100%
+[LOAD] removing double gadgets... 100%
+(bash/ELF/x86_64)>
+----
+pwndbg> ropper -- --search 'pop rdi; ret;'
+[INFO] Load gadgets from cache
+[LOAD] loading... 100%
+[LOAD] removing double gadgets... 100%
+[INFO] Searching for gadgets: pop rdi; ret;
+
+[INFO] File: /usr/bin/bash
+0x000000000001ee23: pop rdi; ret;
+    """,
+)
 @pwndbg.commands.OnlyWithFile
-def ropper(argument):
+def ropper(argument) -> None:
     with tempfile.NamedTemporaryFile() as corefile:
-
         # If the process is running, dump a corefile so we get actual addresses.
-        if pwndbg.proc.alive:
+        if pwndbg.aglib.proc.alive():
             filename = corefile.name
-            gdb.execute('gcore %s' % filename)
+            gdb.execute(f"gcore {filename}")
         else:
-            filename = pwndbg.proc.exe
+            filename = pwndbg.aglib.proc.exe()
 
         # Build up the command line to run
-        cmd = ['ropper',
-               '--file',
-               filename] 
+        cmd = ["ropper", "--file", filename]
         cmd += argument
 
         try:
-            io = subprocess.call(cmd)
+            subprocess.call(cmd)
         except Exception:
             print("Could not run ropper.  Please ensure it's installed and in $PATH.")

@@ -1,20 +1,35 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
+from __future__ import annotations
 
-import six
-
-import pwndbg.auxv
+import pwndbg.aglib.auxv
 import pwndbg.chain
 import pwndbg.commands
+import pwndbg.lib.cache
+from pwndbg.commands import CommandCategory
 
 
-@pwndbg.commands.ArgparsedCommand('Print information from the Auxiliary ELF Vector.')
+@pwndbg.commands.Command(
+    "Print information from the Auxiliary ELF Vector.", category=CommandCategory.LINUX
+)
 @pwndbg.commands.OnlyWhenRunning
-def auxv():
-    for k, v in sorted(pwndbg.auxv.get().items()):
+@pwndbg.commands.OnlyWhenUserspace
+def auxv() -> None:
+    for k, v in pwndbg.aglib.auxv.get().items():
         if v is not None:
-            print(k.ljust(24), v if not isinstance(v, six.integer_types) else pwndbg.chain.format(v))
+            print(k.ljust(24), v if not isinstance(v, int) else pwndbg.chain.format(v))
+
+
+@pwndbg.commands.Command(
+    "Explore and print information from the Auxiliary ELF Vector.", category=CommandCategory.LINUX
+)
+@pwndbg.commands.OnlyWhenRunning
+@pwndbg.commands.OnlyWhenUserspace
+def auxv_explore() -> None:
+    old_value = pwndbg.config.auto_explore_auxv.value
+    pwndbg.config.auto_explore_auxv.value = "yes"
+    try:
+        pwndbg.lib.cache.clear_function_cache(pwndbg.aglib.auxv.get)
+        pwndbg.aglib.auxv.get()
+    finally:
+        pwndbg.config.auto_explore_auxv.value = old_value
+
+    auxv()

@@ -1,54 +1,122 @@
-#!/bin/bash
-set -ex
+#!/usr/bin/env bash
+set -e
 
-# If we are a root in a Docker container and `sudo` doesn't exist
+source "$(dirname "$0")/scripts/common.sh"
+
+# If we are a root in a container and `sudo` doesn't exist
 # lets overwrite it with a function that just executes things passed to sudo
 # (yeah it won't work for sudo executed with flags)
-if [ -f /.dockerenv ]  && ! hash sudo 2>/dev/null && whoami | grep root; then
+if ! hash sudo 2> /dev/null && whoami | grep -q root; then
     sudo() {
-        $*
+        ${*}
     }
 fi
 
 # Helper functions
 linux() {
-    uname | grep -i Linux &>/dev/null
+    uname | grep -iqs Linux
 }
 osx() {
-    uname | grep -i Darwin &>/dev/null
+    uname | grep -iqs Darwin
 }
 
 install_apt() {
     sudo apt-get update || true
-    sudo apt-get -y install gdb python-dev python3-dev python-pip python3-pip libglib2.0-dev libc6-dbg
-
-    if uname -m | grep x86_64 > /dev/null; then
-        sudo apt-get -y install libc6-dbg:i386 || true
-    fi
+    sudo apt-get install -y git gdb gdbserver python3-dev python3-venv python3-setuptools
+    sudo apt-get install -y libc6-dbg
 }
 
 install_dnf() {
     sudo dnf update || true
-    sudo dnf -y install gdb gdb-gdbserver python-devel python3-devel python-pip python3-pip glib2-devel make
+    sudo dnf -y install git gdb gdb-gdbserver python3-devel gcc g++ make patch ncurses-devel
     sudo dnf -y debuginfo-install glibc
+}
+
+install_xbps() {
+    sudo xbps-install -Su
+    sudo xbps-install -Sy gdb gcc python-devel python3-devel glibc-devel make curl
+    sudo xbps-install -Sy glibc-dbg
 }
 
 install_swupd() {
     sudo swupd update || true
-    sudo swupd bundle-add gdb python3-basic make c-basic
+    sudo swupd bundle-add gdb python3-basic make c-basic curl
 }
 
-PYTHON=''
-INSTALLFLAGS=''
+install_zypper() {
+    sudo zypper mr -e repo-oss-debug || sudo zypper mr -e repo-debug
+    sudo zypper refresh || true
+    sudo zypper install -y gdb gdbserver python-devel python3-devel glib2-devel make glibc-debuginfo curl
+    sudo zypper install -y python2-pip || true # skip py2 installation if it doesn't exist
 
-if osx || [ "$1" == "--user" ]; then
-    INSTALLFLAGS="--user"
-else
-    PYTHON="sudo "
+    if uname -m | grep -q x86_64; then
+        sudo zypper install -y glibc-32bit-debuginfo || true
+    fi
+}
+
+install_emerge() {
+    sudo emerge --oneshot --deep --newuse --changed-use --changed-deps dev-lang/python dev-debug/gdb
+}
+
+install_oma() {
+    sudo oma refresh || true
+    sudo oma install -y gdb python-3 glib make glibc-dbg curl
+
+    if uname -m | grep -q x86_64; then
+        sudo oma install -y glibc+32-dbg || true
+    fi
+}
+
+install_pacman() {
+    read -p "Do you want to do a full system update? (y/n) [n] " answer
+    # user want to perform a full system upgrade
+    answer=${answer:-n} # n is default
+    if [[ "$answer" == "y" ]]; then
+        sudo pacman -Syu || true
+    fi
+    sudo pacman -S --noconfirm --needed git gdb python which debuginfod curl gcc make patch
+}
+
+install_freebsd() {
+    sudo pkg install git gdb python py39-pip cmake gmake curl
+    which rustc || sudo pkg install rust
+}
+
+usage() {
+    echo "Usage: $0 [--update]"
+    echo "  --update: Install/update dependencies without checking ~/.gdbinit"
+}
+
+UPDATE_MODE=
+for arg in "$@"; do
+    case $arg in
+        --update)
+            UPDATE_MODE=1
+            ;;
+        -h | --help)
+            set +x
+            usage
+            exit 0
+            ;;
+        *)
+            set +x
+            echo "Unknown argument: $arg"
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+PYTHON=''
+
+if osx; then
+    echo "Not supported on macOS. Please use one of the alternative methods listed at:"
+    echo "https://pwndbg.re/dev/contributing/setup-pwndbg-dev/"
+    exit 1
 fi
 
 if linux; then
-    distro=$(cat /etc/os-release | grep "^ID=" | cut -d\= -f2 | sed -e 's/"//g')
+    distro=$(grep "^ID=" /etc/os-release | cut -d'=' -f2 | sed -e 's/"//g')
 
     case $distro in
         "ubuntu")
@@ -57,68 +125,106 @@ if linux; then
         "fedora")
             install_dnf
             ;;
-	"clear-linux-os")
-	    install_swupd
-	    ;;
-        "arch")
-            echo "Install Arch linux using a community package. See:"
-            echo " - https://www.archlinux.org/packages/community/any/pwndbg/"
-            echo " - https://aur.archlinux.org/packages/pwndbg-git/"
-            exit 1
+        "clear-linux-os")
+            install_swupd
             ;;
-        "manjaro")
-            echo "Pwndbg is not avaiable on Manjaro's repositories."
-            echo "But it can be installed using Arch's AUR community package. See:"
-            echo " - https://www.archlinux.org/packages/community/any/pwndbg/"
-            echo " - https://aur.archlinux.org/packages/pwndbg-git/"
-            exit 1
+        "opensuse-leap" | "opensuse-tumbleweed")
+            install_zypper
+            ;;
+        "arch" | "archarm" | "endeavouros" | "manjaro" | "garuda" | "cachyos" | "archcraft" | "artix")
+            install_pacman
+            echo "Logging off and in or conducting a power cycle is required to get debuginfod to work."
+            echo "Alternatively you can manually set the environment variable: DEBUGINFOD_URLS=https://debuginfod.archlinux.org"
+            ;;
+        "void")
+            install_xbps
+            ;;
+        "gentoo")
+            install_emerge
+            ;;
+        "freebsd")
+            install_freebsd
+            ;;
+        "aosc")
+            install_oma
             ;;
         *) # we can add more install command for each distros.
-            echo "\"$distro\" is not supported distro. Will search for 'apt' or 'dnf' package managers."
+            echo "\"$distro\" is not supported distro. Will search for 'apt', 'dnf' or 'pacman' package managers."
             if hash apt; then
                 install_apt
             elif hash dnf; then
                 install_dnf
+            elif hash pacman; then
+                install_pacman
             else
-                echo "\"$distro\" is not supported and your distro don't have apt or dnf that we support currently."
-                exit
+                echo "\"$distro\" is not supported and your distro don't have a package manager that we support currently."
+                exit 2
             fi
             ;;
     esac
 fi
 
 if ! hash gdb; then
-    echo 'Could not find gdb in $PATH'
-    exit
+    echo "Could not find gdb in $PATH"
+    exit 3
 fi
 
-# Update all submodules
-git submodule update --init --recursive
+# Find the Python used in compilation by GDB.
+PYVER=$(gdb -batch -q --nx -ex 'pi import sysconfig; print(sysconfig.get_config_var("VERSION"))')
+PYTHON=$(gdb -batch -q --nx -ex 'pi import sysconfig; print(sysconfig.get_config_vars().get("EXENAME", sysconfig.get_config_var("BINDIR")+"/python"+sysconfig.get_config_var("VERSION")+sysconfig.get_config_var("EXE")))')
 
-# Find the Python version used by GDB.
-PYVER=$(gdb -batch -q --nx -ex 'pi import platform; print(".".join(platform.python_version_tuple()[:2]))')
-PYTHON+=$(gdb -batch -q --nx -ex 'pi import sys; print(sys.executable)')
-PYTHON+="${PYVER}"
-
-# Find the Python site-packages that we need to use so that
-# GDB can find the files once we've installed them.
-if linux && [ -z "$INSTALLFLAGS" ]; then
-    SITE_PACKAGES=$(gdb -batch -q --nx -ex 'pi import site; print(site.getsitepackages()[0])')
-    INSTALLFLAGS="--target ${SITE_PACKAGES}"
+if [ ! -x "$PYTHON" ]; then
+    echo "Error: '$PYTHON' does not exist or is not executable."
+    echo ""
+    echo "It looks like GDB is using a different Python version than the one installed via the package manager."
+    echo ""
+    echo "Possible solutions:"
+    echo "  1. Try installing 'python$PYVER' manually using your package manager."
+    echo "     Example (for Debian/Ubuntu/Kali): 'sudo apt install python$PYVER'"
+    echo "     Example (for Fedora/RHEL): 'sudo dnf install python$PYVER'"
+    echo "  2. Verify your GDB configuration and ensure it supports the correct Python version."
+    echo ""
+    echo "After making the necessary changes, rerun ./setup.sh"
+    exit 1
 fi
 
-# Make sure that pip is available
-if ! ${PYTHON} -m pip -V; then
-    ${PYTHON} -m ensurepip ${INSTALLFLAGS} --upgrade
+# Check python version supported: <3.10, 3.99>
+is_supported=$(echo "$PYVER" | grep -E '3\.(10|11|12|13|14|15|16|17|18|19|[2-9][0-9])' || true)
+if [[ -z "$is_supported" ]]; then
+    echo "Your system has unsupported python version. Please use older pwndbg release:"
+    echo "'git checkout 2024.08.29' - python3.8, python3.9"
+    echo "'git checkout 2023.07.17' - python3.6, python3.7"
+    exit 4
 fi
 
-# Upgrade pip itself
-${PYTHON} -m pip install ${INSTALLFLAGS} --upgrade pip
+# Create the python virtual environment
+echo "Creating virtualenv in path: ${PWNDBG_VENV_PATH}"
+${PYTHON} -m venv -- ${PWNDBG_VENV_PATH}
 
-# Install Python dependencies
-${PYTHON} -m pip install ${INSTALLFLAGS} -Ur requirements.txt
+# Activate venv
+source ${PWNDBG_VENV_PATH}/bin/activate
 
-# Load Pwndbg into GDB on every launch.
-if ! grep pwndbg ~/.gdbinit &>/dev/null; then
-    echo "source $PWD/gdbinit.py" >> ~/.gdbinit
+# Install uv inside the venv
+pip install uv
+
+# Install dependencies
+# No need to install vendored GDB / LLDB since they won't be used
+# with this setup.
+echo "Installing dependencies.."
+# Build pwndbg without isolation (using the pre-installed build backend) so this
+# works offline; scoped here so other `uv sync` calls (docs, lint) keep isolation.
+uv sync --no-install-project --group build
+uv sync --no-build-isolation-package pwndbg
+
+if [ -z "$UPDATE_MODE" ]; then
+    if grep -qs '^[^#]*source.*pwndbg/gdbinit.py' ~/.gdbinit; then
+        echo 'Pwndbg is already sourced in ~/.gdbinit .'
+    else
+        # Load Pwndbg into GDB on every launch.
+        echo "source $PWD/gdbinit.py" >> ~/.gdbinit
+        echo "[*] Added 'source $PWD/gdbinit.py' to ~/.gdbinit so that Pwndbg will be loaded on every launch of GDB."
+    fi
 fi
+
+echo "Set the PWNDBG_NO_AUTOUPDATE environment variable to any value"
+echo "to disable the automatic updating of dependencies when Pwndbg is loaded."

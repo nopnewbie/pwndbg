@@ -1,94 +1,183 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
+from __future__ import annotations
 
-import capstone
-
-import pwndbg.chain
-import pwndbg.color.context as C
-import pwndbg.color.memory as M
-import pwndbg.color.syntax_highlight as H
-import pwndbg.color.theme as theme
-import pwndbg.config as config
-import pwndbg.disasm.jump
-from pwndbg.color import generateColorFunction
+import pwndbg.aglib
+import pwndbg.aglib.nearpc
+import pwndbg.color.context as ctx_color
+import pwndbg.color.memory
+import pwndbg.color.memory as mem_color
+from pwndbg.aglib.disasm.instruction import ALL_JUMP_GROUPS
+from pwndbg.aglib.disasm.instruction import InstructionCondition
+from pwndbg.aglib.disasm.instruction import PwndbgInstruction
+from pwndbg.color import ColorConfig
+from pwndbg.color import ColorParamSpec
+from pwndbg.color import gray
 from pwndbg.color import ljust_colored
+from pwndbg.color import message
+from pwndbg.color import strip
+from pwndbg.color import theme
+from pwndbg.color.message import off
 from pwndbg.color.message import on
 
-capstone_branch_groups = set((
-    capstone.CS_GRP_CALL,
-    capstone.CS_GRP_JUMP
-))
+c = ColorConfig(
+    "disasm",
+    [
+        ColorParamSpec("branch", "bold", "color for disasm (branch/call instruction)"),
+    ],
+)
 
-config_branch = theme.ColoredParameter('disasm-branch-color', 'bold', 'color for disasm (branch/call instruction)')
+config_branch_on = theme.add_param(
+    "disasm-branch-on", "✔", "marker for branches that WILL be taken"
+)
+config_branch_off = theme.add_param(
+    "disasm-branch-off", "✘", "marker for branches that will NOT be taken"
+)
 
-def branch(x):
-    return generateColorFunction(config.disasm_branch_color)(x)
+DEBUG_CACHE = False
 
 
-def syntax_highlight(ins):
-    return H.syntax_highlight(ins, filename='.asm')
+def one_instruction(ins: PwndbgInstruction, linear: bool) -> str:
+    """
+    Returns colorized instructions assembly and operands, and checkmark if branch is taken
 
-
-def instruction(ins):
-    asm = '%-06s %s' % (ins.mnemonic, ins.op_str)
-    if pwndbg.config.syntax_highlight:
-        asm = syntax_highlight(asm)
-    is_branch = set(ins.groups) & capstone_branch_groups
+    Example: `✔ je     _IO_file_xsputn+341`. Inline symbol replacements made. No annotation or branch targets shown.
+    """
+    asm = ins.asm_string
 
     # Highlight the current line if enabled
-    if pwndbg.config.highlight_pc and ins.address == pwndbg.regs.pc:
-        asm = C.highlight(asm)
+    if pwndbg.config.highlight_pc and ins.address == pwndbg.aglib.regs.pc:
+        asm = ctx_color.highlight(asm)
 
-    # tl;dr is a branch?
-    if ins.target not in (None, ins.address + ins.size):
-        sym    = pwndbg.symbol.get(ins.target) or None
-        target = M.get(ins.target)
-        const  = ins.target_const
-        hextarget = hex(ins.target)
-        hexlen    = len(hextarget)
+    is_call_or_jump = ins.groups & ALL_JUMP_GROUPS
 
-        # If it's a constant expression, color it directly in the asm.
-        if const:
-            asm = asm.replace(hex(ins.target), sym or target)
+    # Style the instruction mnemonic if it's a call/jump instruction.
+    if is_call_or_jump:
+        asm = asm.replace(ins.mnemonic, c.branch(ins.mnemonic), 1)
 
-            if sym:
-                asm = '%s <%s>' % (ljust_colored(asm, 36), target)
-
-        # It's not a constant expression, but we've calculated the target
-        # address by emulation.
-        elif sym:
-            asm = '%s <%s; %s>' % (ljust_colored(asm, 36), target, sym)
-
-        # We were able to calculate the target, but there is no symbol
-        # name for it.
-        else:
-            asm += '<%s>' % (target)
-
-    # not a branch
-    elif ins.symbol:
-        if is_branch and not ins.target:
-            asm = '%s <%s>' % (asm, ins.symbol)
-
-            # XXX: not sure when this ever happens
-            asm += '<-- file a pwndbg bug for this'
-        else:
-            asm = asm.replace(hex(ins.symbol_addr), ins.symbol)
-            asm = '%s <%s>' % (ljust_colored(asm, 36), M.get(ins.symbol_addr))
-
-    # Style the instruction mnemonic if it's a branch instruction.
-    if is_branch:
-        asm = asm.replace(ins.mnemonic, branch(ins.mnemonic), 1)
-
+    if linear:
+        asm = f"  {asm}"
     # If we know the conditional is taken, mark it as taken.
-    if ins.condition is None:
-        asm = '  ' + asm
-    elif ins.condition:
-        asm = on('✔ ') + asm
+    elif ins.condition == InstructionCondition.TRUE or ins.is_conditional_jump_taken:
+        asm = on(f"{config_branch_on} ") + asm
+    elif ins.condition == InstructionCondition.FALSE:
+        asm = off(f"{config_branch_off} ") + asm
+    elif ins.condition == InstructionCondition.UNDETERMINED_CONDITIONAL:
+        asm = gray("? ") + asm
     else:
-        asm = '  ' + asm
+        asm = f"  {asm}"
 
+    if DEBUG_CACHE:
+        asm = f"{ins.cache_source.value} {asm}"
     return asm
+
+
+MIN_SPACING = 5
+WHITESPACE_LIMIT = 20
+
+
+# To making the padding visually nicer, the following padding scheme is used for annotations:
+# All instructions in a group will have the same amount of left-adjusting spaces, so they are aligned.
+# A group is defined as a sequence of instructions surrounded by instructions that can change the instruction pointer.
+def instructions_and_padding(instructions: list[PwndbgInstruction], linear: bool) -> list[str]:
+    result: list[str] = []
+
+    cur_padding_len = None
+
+    # Stores intermediate padding results so we can do a final pass to clean up edges and jagged parts
+    # None if padding doesn't apply to the instruction
+    paddings: list[int | None] = []
+
+    # Used for padding. List of groups.
+    # Each group is a list of index into paddings list
+    groups: list[list[int]] = []
+
+    current_group: list[int] = []
+
+    for i, (ins, asm) in enumerate(
+        zip(instructions, (one_instruction(i, linear) for i in instructions))
+    ):
+        if ins.has_jump_target:
+            asm = f"{ljust_colored(asm, 36)} <{ins.target_string}>"
+
+            paddings.append(None)
+            if current_group:
+                groups.append(current_group)
+                current_group = []
+        elif ins.target_memory_operand is not None:
+            if ins.target_memory_operand.value is not None:
+                current_target = pwndbg.color.memory.get_address_or_symbol(
+                    ins.target_memory_operand.value & pwndbg.aglib.arch.ptrmask,
+                    pwndbg.dintegration.manager.get_stack_var_dict_all(),
+                )
+                target_string = f"{ins.target_memory_operand.address_string}, now={current_target}"
+            else:
+                target_string = message.error(
+                    f"Cannot dereference [{mem_color.get(ins.target_memory_operand.address)}]"
+                )
+
+            asm = f"{ljust_colored(asm, 36)} <{target_string}>"
+
+            paddings.append(None)
+            if current_group:
+                groups.append(current_group)
+                current_group = []
+        else:
+            if ins.syscall is not None:
+                asm += f" <{pwndbg.aglib.nearpc.c.syscall_name('SYS_' + ins.syscall_name)}>"
+
+            # Padding the string for a nicer output
+            # This path calculates the padding for each instruction - even if there we don't have annotations for it.
+            # This allows groups to have uniform padding, even if some of the instructions don't have annotations
+            current_group.append(i)
+
+            raw_len = len(strip(asm))
+
+            if cur_padding_len is None or cur_padding_len - raw_len < MIN_SPACING:
+                # First time setting padding, or annotations are getting too close to the disasm, push them to the right again
+                cur_padding_len = raw_len + MIN_SPACING
+            # This path allows the padding to be smaller again
+            # If the instruction has too much whitespace, put the annotation more to the left
+            # Make sure there is an instruction after this one, and it's not a branch. Otherwise, maintain current indentation.
+            elif (
+                i < len(instructions) - 1
+                and not instructions[i + 1].has_jump_target
+                and cur_padding_len - raw_len > WHITESPACE_LIMIT
+            ):
+                cur_padding_len = raw_len + MIN_SPACING
+
+            # Give the padding to the instruction, so we can reuse it in the future
+            if ins.annotation:
+                if ins.annotation_padding is not None:
+                    cur_padding_len = ins.annotation_padding
+                else:
+                    ins.annotation_padding = cur_padding_len
+
+            paddings.append(cur_padding_len)
+
+        result.append(asm)
+
+    if current_group:
+        groups.append(current_group)
+
+    # Make instructions in each group aligned uniformly
+    for group in groups:
+        if len(group) == 0:
+            continue
+
+        # Find minimum spacing
+        min_padding = max(paddings[index] for index in group)
+
+        # Make all the paddings in this group have the same padding
+        for index in group:
+            paddings[index] = min_padding
+
+    final_result = []
+
+    # Final pass to apply final paddings to make alignment of blocks of instructions cleaner
+    for ins, asm, padding in zip(instructions, result, paddings):
+        # Padding being None implies a jump target - this is already baked into "asm"
+        if ins.annotation and padding is not None:
+            asm = f"{ljust_colored(asm, padding)}{ins.annotation}"
+
+        final_result.append(asm)
+
+    return final_result

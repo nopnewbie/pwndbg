@@ -4,6 +4,7 @@ __pycache__/
 
 # C extensions
 *.so
+!tests/binaries/**/glibcs/**/*.so
 
 # Distribution / packaging
 .Python
@@ -23,6 +24,8 @@ var/
 .installed.cfg
 *.egg
 
+!/pwndbg/lib/
+
 # PyInstaller
 #  Usually these files are written by a python script from a template
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
@@ -36,6 +39,7 @@ pip-delete-this-directory.txt
 # Unit test / coverage reports
 htmlcov/
 .tox/
+.cov/
 .coverage
 .coverage.*
 .cache
@@ -50,18 +54,57 @@ coverage.xml
 # Django stuff:
 *.log
 
-# Sphinx documentation
-docs/_build/
+# mkdocs
+site/
+
+# Documentation generation artifacts
+scripts/_docs/*_commands.json
+scripts/_docs/*_configuration.json
+scripts/_docs/*_functions.json
 
 # PyBuilder
 target/
 
 npm-debug.log
-.gdb_history
+**/.gdb_history
 
 # PyCharm project files
 .idea/
+venv/
 
 # PyTest files
 .pytest_cache/
-tests/.pytest_cache/
+tests/binaries/**/*.o
+tests/binaries/**/*.out
+tests/binaries/**/gosample.x*
+tests/binaries/**/div_zero_binary/core
+tests/binaries/**/div_zero_binary/binary
+!tests/binaries/**/*.go
+
+# libc artifacts from glibc and musl builds
+/tests/binaries/host/glibcs/*
+!/tests/binaries/host/glibcs/2.33/
+/tests/binaries/host/glibcs-nodebug/
+/tests/binaries/host/musls/
+
+# QEMU test images
+tests/library/qemu_system/kimages
+
+# VS Code files
+.vscode/
+
+.zig/
+gdb.txt
+
+# venv
+.venv/
+
+# Nix build and dev shell
+result*
+.direnv/
+
+# Vim
+*.swp
+
+# lsp configuration
+pyrightconfig.json

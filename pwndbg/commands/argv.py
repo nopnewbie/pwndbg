@@ -1,130 +1,65 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
+from __future__ import annotations
 
 import argparse
 
-import gdb
-
-import pwndbg.arch
-import pwndbg.argv
+import pwndbg.aglib
+import pwndbg.aglib.argv
 import pwndbg.commands
-import pwndbg.typeinfo
+import pwndbg.commands.telescope
+from pwndbg.commands import CommandCategory
 
 
-@pwndbg.commands.ArgparsedCommand("Prints out the number of arguments.")
+@pwndbg.commands.Command("Prints out the number of arguments.", category=CommandCategory.LINUX)
 @pwndbg.commands.OnlyWhenRunning
-def argc():
-    print(pwndbg.argv.argc)
+def argc() -> None:
+    print(pwndbg.aglib.argv.argc())
 
 
-parser = argparse.ArgumentParser()
-parser.description = "Prints out the contents of argv."
-parser.add_argument("i", nargs='?', type=int, default=None, help="Index of the argument to print out.")
-@pwndbg.commands.ArgparsedCommand(parser,aliases=["args"])
+parser = argparse.ArgumentParser(description="Prints out the contents of argv.")
+parser.add_argument(
+    "i", nargs="?", type=int, default=None, help="Index of the argument to print out."
+)
+
+
+@pwndbg.commands.Command(parser, category=CommandCategory.LINUX)
 @pwndbg.commands.OnlyWhenRunning
-def argv(i=None):
-    start = pwndbg.argv.argv
-    n     = pwndbg.argv.argc+1
-
+def argv(i: int = None) -> None:
     if i is not None:
-        n = 1
-        start += (pwndbg.arch.ptrsize) * i
+        val = pwndbg.aglib.argv.argv(i)
+        if val is None:
+            print("Argv not found")
+            return
 
+        pwndbg.commands.telescope.telescope(int(val.address), 1)
+        return
+
+    start = int(pwndbg.aglib.argv.argv(0).address)
+    n = pwndbg.aglib.argv.argc() + 1
     pwndbg.commands.telescope.telescope(start, n)
 
 
-parser = argparse.ArgumentParser()
-parser.description = "Prints out the contents of the environment."
-parser.add_argument("name", nargs='?', type=str, default=None, help="Name of the environment variable to see.")
-@pwndbg.commands.ArgparsedCommand(parser,aliases=["env","environ"])
+parser = argparse.ArgumentParser(description="Prints out the contents of the environment.")
+parser.add_argument(
+    "name", nargs="?", type=str, default=None, help="Name of the environment variable to see."
+)
+
+
+@pwndbg.commands.Command(parser, aliases=["env", "environ"], category=CommandCategory.LINUX)
 @pwndbg.commands.OnlyWhenRunning
-def envp(name=None):
-    if name is not None:
-        gdb.execute('p $environ("%s")' % name)
-        return
+@pwndbg.commands.OnlyWhenUserspace
+def envp(name: str = None):
     """
     Prints out the contents of the environment.
     """
-    start = pwndbg.argv.envp
-    n     = pwndbg.argv.envc+1
+    if name is not None:
+        val = pwndbg.aglib.argv.environ(name)
+        if val is None:
+            print("Environ not found")
+            return
 
-    return pwndbg.commands.telescope.telescope(start, n)
+        pwndbg.commands.telescope.telescope(int(val.address), 1)
+        return
 
-
-class argv_function(gdb.Function):
-    """
-    Evaluate argv on the supplied value.
-    """
-    def __init__(self):
-        super(argv_function, self).__init__('argv')
-    def invoke(self, number=0):
-        number = int(number)
-
-        if number > pwndbg.argv.argc:
-            return 0
-
-        ppchar = pwndbg.typeinfo.pchar.pointer()
-        value  = gdb.Value(pwndbg.argv.argv)
-        argv   = value.cast(ppchar)
-        return((argv+number).dereference())
-
-argv_function()
-
-
-class envp_function(gdb.Function):
-    """
-    Evaluate envp on the supplied value.
-    """
-    def __init__(self):
-        super(envp_function, self).__init__('envp')
-    def invoke(self, number=0):
-        number = int(number)
-
-        if number > pwndbg.argv.envc:
-            return pwndbg.typeinfo.void
-
-        ppchar = pwndbg.typeinfo.pchar.pointer()
-        value  = gdb.Value(pwndbg.argv.envp)
-        envp   = value.cast(ppchar)
-        return((envp+number).dereference())
-
-envp_function()
-
-
-class argc_function(gdb.Function):
-    """
-    Evaluates to argc.
-    """
-    def __init__(self):
-        super(argc_function, self).__init__('argc')
-    def invoke(self, number=0):
-        return pwndbg.argv.argc
-
-argc_function()
-
-
-class environ_function(gdb.Function):
-    """
-    Evaluate getenv() on the supplied value.
-    """
-    def __init__(self):
-        super(environ_function, self).__init__('environ')
-    def invoke(self, name):
-        name   = name.string() + '='
-        ppchar = pwndbg.typeinfo.pchar.pointer()
-        value  = gdb.Value(pwndbg.argv.envp)
-        envp   = value.cast(ppchar)
-
-        for i in range(pwndbg.argv.envc):
-            ptr = (envp+i).dereference()
-            sz  = ptr.string()
-            if sz.startswith(name):
-                return ptr
-
-        return pwndbg.typeinfo.void
-
-environ_function()
+    start = int(pwndbg.aglib.argv.envp(0).address)
+    n = pwndbg.aglib.argv.envc() + 1
+    pwndbg.commands.telescope.telescope(start, n)

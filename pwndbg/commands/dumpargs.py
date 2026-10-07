@@ -1,59 +1,56 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
+from __future__ import annotations
 
 import argparse
 
+import pwndbg.aglib
+import pwndbg.aglib.disasm.disassembly
 import pwndbg.arguments
 import pwndbg.chain
 import pwndbg.commands
-import pwndbg.commands.telescope
-import pwndbg.disasm
+from pwndbg.commands import CommandCategory
 
 parser = argparse.ArgumentParser(
-    description='Prints determined arguments for call instruction.'
+    description="Prints determined arguments for call/syscall instruction."
 )
-parser.add_argument('-f', '--force', action='store_true', help='Force displaying of all arguments.')
+parser.add_argument("-f", "--force", action="store_true", help="Force displaying of all arguments.")
 
 
-@pwndbg.commands.ArgparsedCommand(parser)
+@pwndbg.commands.Command(parser, aliases=["args"], category=CommandCategory.MISC)
 @pwndbg.commands.OnlyWhenRunning
-def dumpargs(force=False):
+def dumpargs(force: bool = False) -> None:
     args = (not force and call_args()) or all_args()
 
     if args:
-        print('\n'.join(args))
+        print("\n".join(args))
     else:
         print("Couldn't resolve call arguments from registers.")
-        print("Detected ABI: {} ({} bit) either doesn't pass arguments through registers or is not implemented. Maybe they are passed on the stack?".format(pwndbg.arch.current, pwndbg.arch.ptrsize*8))
+        print(
+            f"Detected ABI: {pwndbg.aglib.arch.name} ({pwndbg.aglib.arch.ptrbits} bit) either doesn't pass arguments through registers or is not implemented. Maybe they are passed on the stack?"
+        )
 
 
-def call_args():
+def call_args() -> list[str]:
     """
     Returns list of resolved call argument strings for display.
     Attempts to resolve the target and determine the number of arguments.
-    Should be used only when being on a call instruction.
+
+    Return empty list if PC is not on a call or syscall instruction.
     """
-    results = []
 
-    for arg, value in pwndbg.arguments.get(pwndbg.disasm.one()):
-        code   = False if arg.type == 'char' else True
-        pretty = pwndbg.chain.format(value, code=code)
-        results.append('        %-10s %s' % (arg.name+':', pretty))
-
-    return results
+    # Get arguments and add spacing
+    return [
+        f"        {arg}"
+        for arg in pwndbg.arguments.format_args(pwndbg.aglib.disasm.disassembly.one())
+    ]
 
 
-def all_args():
+def all_args() -> list[str]:
     """
     Returns list of all argument strings for display.
     """
-    results = []
+    results: list[str] = []
 
     for name, value in pwndbg.arguments.arguments():
-        results.append('%4s = %s' % (name, pwndbg.chain.format(value)))
+        results.append(f"{name:>4} = {pwndbg.chain.format(value)}")
 
     return results

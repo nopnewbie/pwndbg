@@ -1,35 +1,45 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
+"""
+Specific command output wrappers.
+"""
+
+from __future__ import annotations
 
 import functools
 import subprocess
+from collections.abc import Callable
 from subprocess import STDOUT
+from typing import TypeVar
+
+from pwnlib.util.misc import which
+from typing_extensions import ParamSpec
 
 import pwndbg.commands
-import pwndbg.which
+
+P = ParamSpec("P")
+T = TypeVar("T")
 
 
-class OnlyWithCommand(object):
-    def __init__(self, command):
-        self.cmd_name = command
-        self.cmd_path = pwndbg.which.which(command)
+class OnlyWithCommand:
+    def __init__(self, *commands: str | list[str]) -> None:
+        self.all_cmds: list[str] = [cmd[0] if isinstance(cmd, list) else cmd for cmd in commands]
+        for command in commands:
+            self.cmd: list[str] = command if isinstance(command, list) else [command]
+            self.cmd_path: str | None = which(self.cmd[0])
+            if self.cmd_path:
+                break
 
-    def __call__(self, function):
-        function.cmd_path = self.cmd_path
+    def __call__(self, function: Callable[P, T]) -> Callable[P, T | None]:
+        function.cmd = self.cmd
 
         @pwndbg.commands.OnlyWithFile
         @functools.wraps(function)
-        def _OnlyWithCommand(*a,**kw):
+        def _OnlyWithCommand(*a: P.args, **kw: P.kwargs) -> T | None:
             if self.cmd_path:
                 return function(*a, **kw)
-            else:
-                raise OSError('Could not find command %s in $PATH' % self.cmd_name)
+            raise OSError(f"Could not find command(s) {', '.join(self.all_cmds)} in $PATH")
+
         return _OnlyWithCommand
 
 
-def call_cmd(cmd):
-    return subprocess.check_output(cmd, stderr=STDOUT).decode('utf-8')
+def call_cmd(*cmd: str) -> str:
+    return subprocess.check_output(cmd, stderr=STDOUT).decode("utf-8")

@@ -1,43 +1,97 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
+from __future__ import annotations
 
 import argparse
 
-import gdb
-
+import pwndbg.aglib.file
+import pwndbg.aglib.proc
+import pwndbg.aglib.qemu
 import pwndbg.commands
-import pwndbg.proc
-import pwndbg.vmmap
 from pwndbg.color import message
+from pwndbg.commands import CommandCategory
 
-options = {'on':'off', 'off':'on'}
+if pwndbg.dbg.is_gdblib_available():
+    import gdb
 
-parser = argparse.ArgumentParser(description='Inspect or modify ASLR status')
-parser.add_argument('state', nargs='?', type=str, choices=options,
-                    help="Turn ASLR on or off (takes effect when target is started)")
 
-@pwndbg.commands.ArgparsedCommand(parser)
-def aslr(state=None):
+def check_aslr() -> tuple[bool | None, str]:
     """
-    Check the current ASLR status, or turn it on/off.
+    Detects the ASLR status. Returns True, False or None.
 
-    Does not take effect until the program is restarted.
+    None is returned when we can't detect ASLR.
     """
+    # QEMU does not support this concept.
+    if pwndbg.aglib.qemu.is_qemu():
+        return None, "Could not detect ASLR on QEMU targets"
+
+    # Systemwide ASLR is disabled
+    try:
+        data = pwndbg.aglib.file.get("/proc/sys/kernel/randomize_va_space")
+        if b"0" in data:
+            return False, "kernel.randomize_va_space == 0"
+    except Exception:
+        print("Could not check ASLR: can't read randomize_va_space")
+
+    # Check the personality of the process
+    if pwndbg.aglib.proc.alive():
+        try:
+            data = pwndbg.aglib.file.get(f"/proc/{pwndbg.aglib.proc.tid()}/personality")
+            personality = int(data, 16)
+            return (personality & 0x40000 == 0), "read status from process' personality"
+        except Exception:
+            print("Could not check ASLR: can't read process' personality")
+
+    if not pwndbg.dbg.is_gdblib_available():
+        return None, "Could not detect ASLR on LLDB"
+
+    # Just go with whatever GDB says it did.
+    #
+    # This should usually be identical to the above, but we may not have
+    # access to procfs.
+    output = gdb.execute("show disable-randomization", to_string=True)
+    return ("is off." in output), "show disable-randomization"
+
+
+options = {"on": "off", "off": "on"}
+
+parser = argparse.ArgumentParser(
+    description="""
+Check the current ASLR status, or turn it on/off.
+
+Does not take effect until the program is restarted.
+""",
+)
+parser.add_argument(
+    "state",
+    nargs="?",
+    type=str,
+    choices=options,
+    help="Turn ASLR on or off (takes effect when target is started)",
+)
+
+
+@pwndbg.commands.Command(parser, category=CommandCategory.LINUX)
+def aslr(state=None) -> None:
     if state:
-        gdb.execute('set disable-randomization %s' % options[state], 
-                    from_tty=False, to_string=True)
+        if pwndbg.dbg.is_gdblib_available():
+            gdb.execute(
+                f"set disable-randomization {options[state]}", from_tty=False, to_string=True
+            )
 
-        if pwndbg.proc.alive:
-            print("Change will take effect when the process restarts")
+            if pwndbg.aglib.proc.alive():
+                print("Change will take effect when the process restarts")
+        else:
+            # TODO: lldb settings set target.disable-aslr false
+            print(
+                "Please use command 'settings set target.disable-aslr true/false', autocommand not supported yet"
+            )
 
-    aslr = pwndbg.vmmap.check_aslr()
-    status = message.off('OFF')
+    aslr, method = check_aslr()
 
-    if aslr:
-        status = message.on('ON')
+    if aslr is True:
+        status = message.on("ON")
+    elif aslr is False:
+        status = message.off("OFF")
+    else:
+        status = message.off("???")
 
-    print("ASLR is %s" % status)
+    print(f"ASLR is {status} ({method})")

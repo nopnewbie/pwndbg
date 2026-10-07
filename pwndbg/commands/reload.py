@@ -1,58 +1,41 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
+from __future__ import annotations
 
-import imp
-import os
+import importlib
 import sys
-import types
 
 import gdb
 
 import pwndbg
 import pwndbg.commands
-import pwndbg.events
-import pwndbg.memoize
-
-try:
-    from __builtins__ import reload as _reload
-except:
-    from imp import reload as _reload
+import pwndbg.gdblib.events
+import pwndbg.lib.cache
+from pwndbg.commands import CommandCategory
 
 
+def rreload(module, _exclude_mods=None) -> None:
+    """Recursively reload modules.
+    Impl based on https://stackoverflow.com/a/66661311/1508881"""
+    for module in list(sys.modules.keys()):
+        if "pwndbg" in module:
+            del sys.modules[module]
 
-def rreload(module, mdict=None):
-    """Recursively reload modules."""
-    name = module.__name__
-
-    if mdict is None:
-        mdict = []
-
-    for attribute_name in getattr(module, '__all__', []) or []:
-        attribute = getattr(module, attribute_name, None)
-        if isinstance(attribute, types.ModuleType) and attribute not in mdict:
-            mdict.append(attribute)
-            rreload(attribute, mdict)
-
-    try:
-        _reload(module)
-    except Exception as e:
-        pass
+    # Mark that we are reloading; this is used to prevent the Command decorator from
+    # erroring out on re-registering the same commands we had registered before
+    gdb.pwndbg_is_reloading = True
+    importlib.import_module("pwndbg")
 
 
-@pwndbg.commands.ArgparsedCommand("Reload pwndbg.")
-def reload(*a):
-    pwndbg.events.on_reload()
+@pwndbg.commands.Command("Reload Pwndbg.", category=CommandCategory.DEV)
+def reload(*a) -> None:
+    pwndbg.gdblib.events.on_reload()
     rreload(pwndbg)
-    pwndbg.events.after_reload()
+    pwndbg.gdblib.events.after_reload()
 
-@pwndbg.commands.ArgparsedCommand("Makes pwndbg reinitialize all state.")
-def reinit_pwndbg():
+
+@pwndbg.commands.Command("Makes Pwndbg reinitialize all state.", category=CommandCategory.DEV)
+def reinit_pwndbg() -> None:
     """
     Makes pwndbg reinitialize all state.
     """
-    pwndbg.memoize.reset()
-    pwndbg.events.after_reload()
+    pwndbg.lib.cache.clear_caches()
+    pwndbg.gdblib.events.after_reload()

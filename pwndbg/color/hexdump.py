@@ -1,39 +1,65 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
+from __future__ import annotations
 
-import pwndbg.color.theme as theme
-import pwndbg.config as config
-from pwndbg.color import generateColorFunction
+from pwndbg import config
+from pwndbg.color import generate_color_function
+from pwndbg.color import theme
 
-config_normal    = theme.ColoredParameter('hexdump-normal-color', 'none', 'color for hexdump command (normal bytes)')
-config_printable = theme.ColoredParameter('hexdump-printable-color', 'bold', 'color for hexdump command (printable characters)')
-config_zero      = theme.ColoredParameter('hexdump-zero-color', 'red', 'color for hexdump command (zero bytes)')
-config_special   = theme.ColoredParameter('hexdump-special-color', 'yellow', 'color for hexdump command (special bytes)')
-config_offset    = theme.ColoredParameter('hexdump-offset-color', 'none', 'color for hexdump command (offset label)')
-config_address   = theme.ColoredParameter('hexdump-address-color', 'none', 'color for hexdump command (address label)')
-config_separator = theme.ColoredParameter('hexdump-separator-color', 'none', 'color for hexdump command (group separator)')
+config_normal = theme.add_color_param(
+    "hexdump-normal-color", "none", "color for hexdump command (normal bytes)"
+)
+config_printable = theme.add_color_param(
+    "hexdump-printable-color", "bold", "color for hexdump command (printable characters)"
+)
+config_zero = theme.add_color_param(
+    "hexdump-zero-color", "red", "color for hexdump command (zero bytes)"
+)
+config_special = theme.add_color_param(
+    "hexdump-special-color", "yellow", "color for hexdump command (special bytes)"
+)
+config_offset = theme.add_color_param(
+    "hexdump-offset-color", "none", "color for hexdump command (offset label)"
+)
+config_address = theme.add_color_param(
+    "hexdump-address-color", "none", "color for hexdump command (address label)"
+)
+config_separator = theme.add_color_param(
+    "hexdump-separator-color", "none", "color for hexdump command (group separator)"
+)
+config_highlight_group_lsb = theme.add_param(
+    "hexdump-highlight-group-lsb",
+    "underline",
+    "highlight LSB of each group",
+    help_docstring="Applies only if hexdump-use-big-endian actually changes byte order.",
+)
 
-def normal(x):
-    return generateColorFunction(config.hexdump_normal_color)(x)
 
-def printable(x):
-    return generateColorFunction(config.hexdump_printable_color)(x)
+def normal(x: str) -> str:
+    return config_normal.color_function(x)
 
-def zero(x):
-    return generateColorFunction(config.hexdump_zero_color)(x)
 
-def special(x):
-    return generateColorFunction(config.hexdump_special_color)(x)
+def printable(x: str) -> str:
+    return config_printable.color_function(x)
 
-def offset(x):
-    return generateColorFunction(config.hexdump_offset_color)(x)
 
-def address(x):
-    return generateColorFunction(config.hexdump_address_color)(x)
+def zero(x: str) -> str:
+    return config_zero.color_function(x)
 
-def separator(x):
-    return generateColorFunction(config.hexdump_separator_color)(x)
+
+def special(x: str) -> str:
+    return config_special.color_function(x)
+
+
+def offset(x: str) -> str:
+    return config_offset.color_function(x)
+
+
+def address(x: str) -> str:
+    return config_address.color_function(x)
+
+
+def separator(x: str) -> str:
+    return config_separator.color_function(x)
+
+
+def highlight_group_lsb(x: str) -> str:
+    return generate_color_function(config.hexdump_highlight_group_lsb)(x)

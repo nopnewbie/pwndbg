@@ -1,210 +1,222 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
 """
-Allows describing functions, specifically enumerating arguments which
-may be passed in a combination of registers and stack values.
+Function and syscall argument formatting.
+
+Enumerates arguments which may be passed in a combination of
+registers and stack values.
 """
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
 
-import gdb
-from capstone import CS_GRP_CALL
-from capstone import CS_GRP_INT
+from __future__ import annotations
 
-import pwndbg.abi
-import pwndbg.arch
+import re
+
+from capstone6pwndbg import CS_GRP_INT
+
+import pwndbg.aglib
+import pwndbg.aglib.file
+import pwndbg.aglib.memory
+import pwndbg.aglib.objc
+import pwndbg.aglib.proc
+import pwndbg.aglib.symbol
 import pwndbg.chain
-import pwndbg.color.nearpc as N
-import pwndbg.constants
-import pwndbg.disasm
-import pwndbg.funcparser
-import pwndbg.functions
-import pwndbg.ida
-import pwndbg.memory
-import pwndbg.regs
-import pwndbg.symbol
-import pwndbg.typeinfo
-
-ida_replacements = {
-    '__int64': 'signed long long int',
-    '__int32': 'signed int',
-    '__int16': 'signed short',
-    '__int8': 'signed char',
-    '__uint64': 'unsigned long long int',
-    '__uint32': 'unsigned int',
-    '__uint16': 'unsigned short',
-    '__uint8': 'unsigned char',
-    '_BOOL_1': 'unsigned char',
-    '_BOOL_2': 'unsigned short',
-    '_BOOL_4': 'unsigned int',
-    '_BYTE': 'unsigned char',
-    '_WORD': 'unsigned short',
-    '_DWORD': 'unsigned int',
-    '_QWORD': 'unsigned long long',
-    '__pure': '',
-    '__hidden': '',
-    '__return_ptr': '',
-    '__struct_ptr': '',
-    '__array_ptr': '',
-    '__fastcall': '',
-    '__cdecl': '',
-    '__thiscall': '',
-    '__userpurge': '',
-}
+import pwndbg.dbg_mod
+import pwndbg.enhance
+import pwndbg.lib.abi
+import pwndbg.lib.functions
+from pwndbg.aglib.disasm.instruction import PwndbgInstruction
+from pwndbg.aglib.nearpc import c as N
+from pwndbg.lib.arch import Platform
+from pwndbg.lib.functions import Function
+from pwndbg.lib.functions import format_flags_argument
 
 
-def get_syscall_name(instruction):
-    if CS_GRP_INT not in instruction.groups:
-        return None
-
-    try:
-        abi     = pwndbg.abi.ABI.syscall()
-        syscall = getattr(pwndbg.regs, abi.syscall_register)
-        name    = pwndbg.constants.syscall(syscall)
-
-        return 'SYS_' + name
-    except:
-        return None
-
-
-def get(instruction):
+def get(instruction: PwndbgInstruction) -> list[tuple[pwndbg.lib.functions.Argument, int]]:
     """
     Returns an array containing the arguments to the current function,
-    if $pc is a 'call' or 'bl' type instruction.
+    if $pc is a function call or syscall instruction.
 
     Otherwise, returns None.
     """
-    n_args_default = 4
 
-    if instruction.address != pwndbg.regs.pc:
+    if instruction is None:
         return []
 
-    try:
-        abi = pwndbg.abi.ABI.default()
-    except KeyError:
+    if instruction.address != pwndbg.aglib.regs.pc:
         return []
 
-    if CS_GRP_CALL in instruction.groups:
-        # Not sure of any OS which allows multiple operands on
-        # a call instruction.
-        assert len(instruction.operands) == 1
+    if instruction.call_like:
+        abi = pwndbg.aglib.arch.function_abi
 
-        target = instruction.operands[0].int
+        if abi is None:
+            return []
+
+        target = instruction.target
 
         if not target:
             return []
 
-        name = pwndbg.symbol.get(target)
+        name = pwndbg.aglib.symbol.resolve_addr(target)
         if not name:
             return []
     elif CS_GRP_INT in instruction.groups:
         # Get the syscall number and name
-        abi = pwndbg.abi.ABI.syscall()
+        name = instruction.syscall_name
+        abi = pwndbg.aglib.arch.syscall_abi
+        target = None
 
-        target  = None
-        syscall = getattr(pwndbg.regs, abi.syscall_register)
-        name    = pwndbg.constants.syscall(syscall)
+        if name is None or abi is None:
+            return []
     else:
         return []
 
-    result = []
-    name = name or ''
+    original_name = name or ""
 
-    sym   = gdb.lookup_symbol(name)
-    name  = name.replace('isoc99_', '') # __isoc99_sscanf
-    name  = name.replace('@plt', '')    # getpwiod@plt
+    name = original_name.replace("isoc99_", "")  # __isoc99_sscanf
+    name = name.replace("@plt", "")  # getpwiod@plt
 
     # If we have particular `XXX_chk` function in our database, we use it.
     # Otherwise, we show args for its unchecked version.
     # We also lstrip `_` in here, as e.g. `__printf_chk` needs the underscores.
-    if name not in pwndbg.functions.functions:
-        name  = name.replace('_chk', '')
-        name  = name.strip().lstrip('_')    # _malloc
+    if name not in pwndbg.lib.functions.functions:
+        name = name.replace("_chk", "")
+        name = name.strip().lstrip("_")  # _malloc
 
-    func = pwndbg.functions.functions.get(name, None)
+    func: Function | None = None
+    if pwndbg.aglib.arch.platform == Platform.DARWIN:
+        # Try to resolve an Objective-C method call.
+        #
+        # Checking this first keeps us from resolving these as simple calls to
+        # `objc_msgSend` and functions like it, which have definitions that are
+        # rather barren of semantics in comparison.
+        func = pwndbg.aglib.objc.try_resolve_call_at_current_pc(instruction)
 
-    # Try to extract the data from GDB.
-    # Note that this is currently broken, pending acceptance of
-    # my patch: https://sourceware.org/ml/gdb-patches/2015-06/msg00268.html
-    if sym and sym[0]:
-        try:
-            n_args_default = len(sym[0].type.fields())
-        except TypeError:
-            pass
+    if func is None:
+        # If more specific call information can't be determined, use the regular
+        # function resolution flow.
+        func = pwndbg.lib.functions.functions.get(name, None)
 
+    # FIXME(provider, integration): Add this feature back at some point
     # Try to grab the data out of IDA
-    if not func and target:
-        typename = pwndbg.ida.GetType(target)
-
-        if typename:
-            typename += ';'
-
-            # GetType() does not include the name.
-            typename = typename.replace('(', ' function_name(', 1)
-
-            for k, v in ida_replacements.items():
-                typename = typename.replace(k, v)
-
-            func = pwndbg.funcparser.ExtractFuncDeclFromSource(typename + ';')
+    # if not func and target:
+    #    func = pwndbg.dintegration.provider.get_func_type(target)
 
     if func:
         args = func.args
+        if len(args) > 1 and args[-1].name == "vararg":
+            format_value = pwndbg.enhance.enhance(argument(len(args) - 2, abi))
+            m = re.findall(
+                r"%[-+ #0]?(?:[0-9]+|\*)?(?:\.(?:[0-9]+|\*))?(?:hh|h|l|ll|q|L|j|z|Z|t)?[diuoxXfFeEgGaAcsCSpn]",
+                format_value,
+            )
+            vararg_cnt = len(m)
+            if vararg_cnt > 0:
+                args.pop()
+                args += [
+                    pwndbg.lib.functions.Argument("int", 0, argname(len(args) + i, abi))
+                    for i in range(vararg_cnt)
+                ]
     else:
-        args = [pwndbg.functions.Argument('int', 0, argname(i, abi)) for i in range(n_args_default)]
+        n_args_default = 4
+        sym = pwndbg.aglib.symbol.lookup_frame_symbol(original_name)
+        if sym:
+            try:
+                target_type = sym.type.target()
+            except Exception:
+                target_type = sym.type
 
-    for i, arg in enumerate(args):
-        result.append((arg, argument(i, abi)))
+            if target_type and target_type.code == pwndbg.dbg_mod.TypeCode.FUNC:
+                func_args = target_type.func_arguments()
+                if func_args is not None:
+                    n_args_default = len(func_args)
+        args = (
+            pwndbg.lib.functions.Argument("int", 0, argname(i, abi)) for i in range(n_args_default)
+        )
 
-    return result
+    return [(arg, argument(i, abi)) for i, arg in enumerate(args)]
 
 
-def argname(n, abi=None):
-    abi  = abi or pwndbg.abi.ABI.default()
+def argname(n: int, abi: pwndbg.lib.abi.ABI) -> str:
     regs = abi.register_arguments
 
     if n < len(regs):
         return regs[n]
 
-    return 'arg[%i]' % n
+    return f"arg[{n}]"
 
 
-def argument(n, abi=None):
+def argument(n: int, abi: pwndbg.lib.abi.ABI | None = None) -> int:
     """
     Returns the nth argument, as if $pc were a 'call' or 'bl' type
     instruction.
     Works only for ABIs that use registers for arguments.
     """
-    abi  = abi or pwndbg.abi.ABI.default()
+    abi = abi or pwndbg.aglib.arch.function_abi
+    if abi is None:
+        raise pwndbg.dbg_mod.DebuggerError(
+            f"Function ABI not defined for current architecture, {pwndbg.aglib.arch.function_abi}"
+        )
     regs = abi.register_arguments
 
     if n < len(regs):
-        return getattr(pwndbg.regs, regs[n])
+        return pwndbg.aglib.regs.read_reg_uncached(regs[n])
 
     n -= len(regs)
 
-    sp = pwndbg.regs.sp + (n * pwndbg.arch.ptrsize)
+    sp = pwndbg.aglib.regs.sp + (n * pwndbg.aglib.arch.ptrsize)
 
-    return int(pwndbg.memory.poi(pwndbg.typeinfo.ppvoid, sp))
+    return pwndbg.aglib.memory.read_pointer_width(sp)
 
 
-def arguments(abi=None):
+def arguments(abi: pwndbg.lib.abi.ABI | None = None):
     """
     Yields (arg_name, arg_value) tuples for arguments from a given ABI.
     Works only for ABIs that use registers for arguments.
     """
-    abi  = abi or pwndbg.abi.ABI.default()
+    abi = abi or pwndbg.aglib.arch.function_abi
+    if abi is None:
+        return []
     regs = abi.register_arguments
 
     for i in range(len(regs)):
         yield argname(i, abi), argument(i, abi)
 
 
-def format_args(instruction):
+# When an argument is named one of these in Linux syscalls/glibc, it refers to a file descriptor
+# Search for strings containing "fd" in https://chromium.googlesource.com/chromiumos/docs/+/master/constants/syscalls.md
+FILE_DESCRIPTOR_ARG_NAMES = {
+    "fd",
+    "in_fd",
+    "out_fd",
+    "fdin",
+    "fdout",
+    "oldfd",
+    "fildes",
+    "newfd",
+    "epfd",
+    "dfd",
+    "dirfd",
+    "mountdirfd",
+}
+
+
+def format_args(instruction: PwndbgInstruction) -> list[str]:
     result = []
     for arg, value in get(instruction):
-        code   = arg.type != 'char'
-        pretty = pwndbg.chain.format(value, code=code)
-        result.append('%-10s %s' % (N.argument(arg.name) + ':', pretty))
+        code = arg.type != "char"
+        pretty = (
+            pwndbg.chain.format(value, code=code)
+            if not arg.flags
+            else format_flags_argument(arg.flags, value)
+        )
+
+        # Enhance args display
+        if arg.name in FILE_DESCRIPTOR_ARG_NAMES and isinstance(value, int):
+            # Cannot find PID of the QEMU program: perhaps it is in a different pid namespace or we have no permission to read the QEMU process' /proc/$pid/fd/$fd file.
+            pid = pwndbg.aglib.proc.pid()
+            if pid is not None:
+                path = pwndbg.aglib.file.readlink(f"/proc/{pid}/fd/{value}")
+                if path:
+                    pretty += f" ({path})"
+
+        result.append(f"{N.argument(arg.name) + ':':<10} {pretty}")
+
     return result

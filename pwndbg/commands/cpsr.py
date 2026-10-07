@@ -1,32 +1,34 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
+from __future__ import annotations
 
-import pwndbg.arch
+import argparse
+
+import pwndbg.aglib
+import pwndbg.aglib.proc
 import pwndbg.commands
-import pwndbg.regs
 from pwndbg.color import context
-from pwndbg.color import message
+from pwndbg.commands import CommandCategory
+
+parser = argparse.ArgumentParser(description="Print out ARM CPSR or xPSR register.")
+
+parser.add_argument(
+    "cpsr_value", help="Parse the given CPSR value instead of the actual one.", nargs="?", type=int
+)
 
 
-@pwndbg.commands.ArgparsedCommand('Print out ARM CPSR or xPSR register')
+@pwndbg.commands.Command(
+    parser,
+    aliases=["xpsr", "pstate"],
+    category=CommandCategory.REGISTER,
+)
+@pwndbg.aglib.proc.OnlyWithArch(["arm", "armcm", "aarch64"])
 @pwndbg.commands.OnlyWhenRunning
-def cpsr():
-    arm_print_psr()
+def cpsr(cpsr_value=None) -> None:
+    reg = "xpsr" if pwndbg.aglib.arch.name == "armcm" else "cpsr"
+    reg_flags = pwndbg.aglib.regs.flags[reg]
 
-@pwndbg.commands.ArgparsedCommand('Print out ARM xPSR or CPSR register')
-@pwndbg.commands.OnlyWhenRunning
-def xpsr():
-    arm_print_psr()
+    if cpsr_value is not None:
+        reg_val = cpsr_value
+    else:
+        reg_val = pwndbg.aglib.regs.read_reg(reg)
 
-def arm_print_psr():
-    if pwndbg.arch.current not in ('arm', 'armcm'):
-        print(message.warn("This is only available on ARM"))
-        return
-
-    reg = 'cpsr' if pwndbg.arch.current == 'arm' else 'xpsr'
-    print('%s %s' % (reg, context.format_flags(getattr(pwndbg.regs, reg), pwndbg.regs.flags[reg])))
-
+    print(f"{reg} {context.format_flags(reg_val, reg_flags)}")

@@ -1,33 +1,16 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-cd tests/binaries && make && cd ../..
+source "$(dirname "$0")/scripts/common.sh"
 
-# NOTE: We run tests under GDB sessions and because of some cleanup/tests dependencies problems
-# we decided to run each test in a separate GDB session
-TESTS_LIST=$(gdb --silent --nx --nh --command gdbinit.py --command pytests_collect.py --eval-command quit | grep -o "tests/.*::.*")
+# Use ldd to fetch the glibc version.
+# Can help with diagnosing CI issues.
+glibc_version=$(ldd --version | sed -n '1s/([^)]*)//g; s/.* \([0-9]\+\.[0-9]\+\)$/\1/p')
+echo "glibc version: $glibc_version"
 
-tests_passed_or_skipped=0
-tests_failed=0
+# Run integration tests
+cd "${PWNDBG_ABS_PATH}"
 
-for test_case in ${TESTS_LIST}; do
-    PWNDBG_LAUNCH_TEST="${test_case}" PWNDBG_DISABLE_COLORS=1 gdb --silent --nx --nh --command gdbinit.py --command pytests_launcher.py --eval-command quit
+$UV_RUN_TEST python3 -m tests.tests $@
 
-    exit_status=$?
-
-    if [ ${exit_status} -eq 0 ]; then
-        (( ++tests_passed_or_skipped ))
-    else
-        (( ++tests_failed ))
-    fi
-done
-
-echo ""
-echo "*********************************"
-echo "********* TESTS SUMMARY *********"
-echo "*********************************"
-echo "Tests passed or skipped: ${tests_passed_or_skipped}"
-echo "Tests failed: ${tests_failed}"
-
-if [ ${tests_failed} -ne 0 ]; then
-    exit 1
-fi
+exit_code=$?
+exit $exit_code
